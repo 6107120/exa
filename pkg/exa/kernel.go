@@ -17,7 +17,8 @@ import (
 
 // Engine is the core high-precision expression kernel.
 type Engine struct {
-	envCache sync.Map // map[string]*cel.Env
+	envCache     sync.Map // map[string]*cel.Env
+	programCache sync.Map // map[string]cel.Program
 }
 
 func NewEngine() *Engine {
@@ -26,7 +27,17 @@ func NewEngine() *Engine {
 
 // Compute executes a set of formulas against a given input context.
 func (e *Engine) Compute(ctx context.Context, req Request) (map[string]decimal.Decimal, error) {
-	// 1. Prepare Environment & Compile ASTs
+	// 1. Validate identifiers and compile ASTs
+	uniqueKeys := make(map[string]bool)
+	for k := range req.Inputs {
+		if uniqueKeys[k] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, k) }
+		uniqueKeys[k] = true
+	}
+	for _, p := range req.Policy {
+		if uniqueKeys[p.ID] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, p.ID) }
+		uniqueKeys[p.ID] = true
+	}
+
 	env, err := e.getEnv(req)
 	if err != nil {
 		return nil, err
@@ -54,9 +65,18 @@ func (e *Engine) Compute(ctx context.Context, req Request) (map[string]decimal.D
 		default:
 		}
 
-		prg, err := env.Program(node.ast)
-		if err != nil {
-			return nil, fmt.Errorf("program error for [%s]: %w", node.ID, err)
+		// Cache key: [envCacheKey]:[expression]
+		progKey := fmt.Sprintf("%s:%s", e.getEnvKey(req), node.Expression)
+		var prg cel.Program
+		if val, ok := e.programCache.Load(progKey); ok {
+			prg = val.(cel.Program)
+		} else {
+			var err error
+			prg, err = env.Program(node.ast)
+			if err != nil {
+				return nil, &EvalError{ID: node.ID, Inner: err}
+			}
+			e.programCache.Store(progKey, prg)
 		}
 
 		res, _, err := prg.Eval(results)
@@ -74,28 +94,21 @@ func (e *Engine) Compute(ctx context.Context, req Request) (map[string]decimal.D
 	return output, nil
 }
 
-func (e *Engine) getEnv(req Request) (*cel.Env, error) {
-	uniqueKeys := make(map[string]bool)
+func (e *Engine) getEnvKey(req Request) string {
 	keys := make([]string, 0, len(req.Inputs)+len(req.Policy))
-	
-	for k := range req.Inputs {
-		if uniqueKeys[k] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, k) }
-		uniqueKeys[k] = true
-		keys = append(keys, k)
-	}
-	for _, p := range req.Policy {
-		if uniqueKeys[p.ID] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, p.ID) }
-		uniqueKeys[p.ID] = true
-		keys = append(keys, p.ID)
-	}
-	
+	for k := range req.Inputs { keys = append(keys, k) }
+	for _, p := range req.Policy { keys = append(keys, p.ID) }
 	sort.Strings(keys)
-	cacheKey := strings.Join(keys, ",")
+	return strings.Join(keys, ",")
+}
 
+func (e *Engine) getEnv(req Request) (*cel.Env, error) {
+	cacheKey := e.getEnvKey(req)
 	if val, ok := e.envCache.Load(cacheKey); ok {
 		return val.(*cel.Env), nil
 	}
 
+	keys := strings.Split(cacheKey, ",")
 	reg := NewRegistry()
 	opts := []cel.EnvOption{
 		cel.Lib(Library{}),
@@ -103,6 +116,7 @@ func (e *Engine) getEnv(req Request) (*cel.Env, error) {
 		cel.CustomTypeAdapter(reg),
 	}
 	for _, k := range keys {
+		if k == "" { continue }
 		opts = append(opts, cel.Variable(k, cel.DynType))
 	}
 
