@@ -1,0 +1,15 @@
+# Go build artifacts
+bin/
+*.exe
+
+# Dependency directories
+vendor/
+
+# IDE and System files
+.vscode/
+.idea/
+.DS_Store
+
+# Test coverage
+coverage.out
+*.env
