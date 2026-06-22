@@ -6,6 +6,7 @@ require (
 	github.com/google/cel-go v0.28.0
 	github.com/shopspring/decimal v1.4.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/text v0.22.0
 )
 
 require (

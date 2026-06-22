@@ -27,35 +27,55 @@ func NewEngine() *Engine {
 
 // Compute executes a set of formulas against a given input context.
 func (e *Engine) Compute(ctx context.Context, req Request) (map[string]decimal.Decimal, error) {
-	// 1. Validate identifiers and compile ASTs
+	// 0. Preprocessing: Normalize and clean all Unicode strings (NFC, remove invisible control chars, etc.)
+	req = NormalizeRequest(req)
+
+	res, err := e.compute(ctx, req)
+	if err != nil {
+		return nil, DeobfuscateError(err)
+	}
+	return res, nil
+}
+
+func (e *Engine) compute(ctx context.Context, req Request) (map[string]decimal.Decimal, error) {
+	// 1. High-performance Fast-Path: If no Unicode characters are present, bypass transpilation completely.
+	var transpiledReq Request
+	isTranspiled := NeedsTranspilation(req)
+	if isTranspiled {
+		transpiledReq = TranspileRequest(req)
+	} else {
+		transpiledReq = req
+	}
+
+	// 2. Validate identifiers and compile ASTs
 	uniqueKeys := make(map[string]bool)
-	for k := range req.Inputs {
+	for k := range transpiledReq.Inputs {
 		if uniqueKeys[k] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, k) }
 		uniqueKeys[k] = true
 	}
-	for _, p := range req.Policy {
+	for _, p := range transpiledReq.Policy {
 		if uniqueKeys[p.ID] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, p.ID) }
 		uniqueKeys[p.ID] = true
 	}
 
-	env, err := e.getEnv(req)
+	env, err := e.getEnv(transpiledReq)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Sort nodes by dependency (DAG)
-	nodes, err := sortByDependencies(req.Policy)
+	// 3. Sort nodes by dependency (DAG)
+	nodes, err := sortByDependencies(transpiledReq.Policy)
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. Execution Context (Flat namespace)
+	// 4. Execution Context (Flat namespace)
 	results := make(map[string]any)
-	for k, v := range req.Inputs {
+	for k, v := range transpiledReq.Inputs {
 		results[k] = convertToRefVal(v)
 	}
 
-	// 4. Sequential Execution
+	// 5. Sequential Execution
 	output := make(map[string]decimal.Decimal)
 	for _, node := range nodes {
 		// Check for context cancellation
@@ -66,7 +86,7 @@ func (e *Engine) Compute(ctx context.Context, req Request) (map[string]decimal.D
 		}
 
 		// Cache key: [envCacheKey]:[expression]
-		progKey := fmt.Sprintf("%s:%s", e.getEnvKey(req), node.Expression)
+		progKey := fmt.Sprintf("%s:%s", e.getEnvKey(transpiledReq), node.Expression)
 		var prg cel.Program
 		if val, ok := e.programCache.Load(progKey); ok {
 			prg = val.(cel.Program)
@@ -91,7 +111,13 @@ func (e *Engine) Compute(ctx context.Context, req Request) (map[string]decimal.D
 		}
 	}
 
-	return output, nil
+	// Re-map output keys to original decoded Unicode format
+	decodedOutput := make(map[string]decimal.Decimal, len(output))
+	for k, v := range output {
+		decodedOutput[decodeUnicodeIdent(k)] = v
+	}
+
+	return decodedOutput, nil
 }
 
 func (e *Engine) getEnvKey(req Request) string {
