@@ -311,19 +311,22 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 	var overloads []*functions.Overload
 
 	typeNames := []string{"int", "uint", "double", "string", "bytes", "duration", "timestamp", "bool", "list", "map"}
+	builtins := []string{"int64", "uint64", "double"}
 
-	// 1. Arithmetic Operators bindings
+	// 1. Arithmetic Operators bindings (including builtins hijacking)
 	arithOps := []struct {
-		op string
-		f  func(d1, d2 decimal.Decimal) decimal.Decimal
+		op     string
+		prefix string
+		f      func(d1, d2 decimal.Decimal) decimal.Decimal
 	}{
-		{operators.Add, func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Add(d2) }},
-		{operators.Subtract, func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Sub(d2) }},
-		{operators.Multiply, func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Mul(d2) }},
+		{operators.Add, "add", func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Add(d2) }},
+		{operators.Subtract, "subtract", func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Sub(d2) }},
+		{operators.Multiply, "multiply", func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Mul(d2) }},
 	}
 
 	for _, spec := range arithOps {
 		op := spec.op
+		prefix := spec.prefix
 		f := spec.f
 
 		overloads = append(overloads, &functions.Overload{
@@ -343,9 +346,20 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 				},
 			})
 		}
+
+		// Hijack standard operators to ensure that dyn + decimal or int + dyn evaluates cleanly as Decimal
+		for _, bName := range builtins {
+			overloads = append(overloads, &functions.Overload{
+				Operator: fmt.Sprintf("%s_%s", prefix, bName),
+				Binary: func(lhs, rhs ref.Val) ref.Val {
+					l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
+					return NewDecimal(f(l, r))
+				},
+			})
+		}
 	}
 
-	// Division Operator with zero division guard
+	// Division Operator with zero division guard (including builtins hijacking)
 	overloads = append(overloads, &functions.Overload{
 		Operator: "divide_decimal_dyn",
 		Binary: func(lhs, rhs ref.Val) ref.Val {
@@ -366,19 +380,32 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 		})
 	}
 
-	// 2. Comparison Operators bindings
+	for _, bName := range builtins {
+		overloads = append(overloads, &functions.Overload{
+			Operator: fmt.Sprintf("divide_%s", bName),
+			Binary: func(lhs, rhs ref.Val) ref.Val {
+				l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
+				if r.IsZero() { return types.NewErr("division by zero") }
+				return NewDecimal(l.Div(r))
+			},
+		})
+	}
+
+	// 2. Comparison Operators bindings (including builtins hijacking)
 	cmpOps := []struct {
-		op string
-		f  func(d1, d2 decimal.Decimal) bool
+		op     string
+		prefix string
+		f      func(d1, d2 decimal.Decimal) bool
 	}{
-		{operators.Greater, func(d1, d2 decimal.Decimal) bool { return d1.GreaterThan(d2) }},
-		{operators.Less, func(d1, d2 decimal.Decimal) bool { return d1.LessThan(d2) }},
-		{operators.GreaterEquals, func(d1, d2 decimal.Decimal) bool { return d1.GreaterThanOrEqual(d2) }},
-		{operators.LessEquals, func(d1, d2 decimal.Decimal) bool { return d1.LessThanOrEqual(d2) }},
+		{operators.Greater, "greater", func(d1, d2 decimal.Decimal) bool { return d1.GreaterThan(d2) }},
+		{operators.Less, "less", func(d1, d2 decimal.Decimal) bool { return d1.LessThan(d2) }},
+		{operators.GreaterEquals, "greater_equals", func(d1, d2 decimal.Decimal) bool { return d1.GreaterThanOrEqual(d2) }},
+		{operators.LessEquals, "less_equals", func(d1, d2 decimal.Decimal) bool { return d1.LessThanOrEqual(d2) }},
 	}
 
 	for _, spec := range cmpOps {
 		op := spec.op
+		prefix := spec.prefix
 		f := spec.f
 
 		overloads = append(overloads, &functions.Overload{
@@ -392,6 +419,16 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 		for _, tName := range typeNames {
 			overloads = append(overloads, &functions.Overload{
 				Operator: fmt.Sprintf("%s_%s_decimal", op, tName),
+				Binary: func(lhs, rhs ref.Val) ref.Val {
+					l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
+					return types.Bool(f(l, r))
+				},
+			})
+		}
+
+		for _, bName := range builtins {
+			overloads = append(overloads, &functions.Overload{
+				Operator: fmt.Sprintf("%s_%s", prefix, bName),
 				Binary: func(lhs, rhs ref.Val) ref.Val {
 					l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
 					return types.Bool(f(l, r))

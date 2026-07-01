@@ -175,3 +175,29 @@ func TestExa_DynamicMapPromotion(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, res["sample"].Equal(decimal.NewFromInt(20)))
 }
+
+func TestExa_ImplicitDecimalSize(t *testing.T) {
+	ctx := context.Background()
+	engine := NewEngine()
+
+	req := Request{
+		Inputs: map[string]any{
+			"segments": []any{1, 2, 3}, // size(segments) = 3 (int)
+			"contract": map[string]any{
+				"fixed_overtime_minutes": "120", // 120 / 60 = 2 (Decimal)
+				"period_total_days":      "30",  // Decimal
+			},
+		},
+		Policy: []Calculation{
+			{
+				ID:         "result",
+				Expression: "(contract['fixed_overtime_minutes'] / 60) * (size(segments) / (contract['period_total_days']))",
+			},
+		},
+	}
+
+	res, err := engine.Compute(ctx, req)
+	assert.NoError(t, err)
+	assert.True(t, res["result"].Equal(decimal.RequireFromString("0.2")))
+}
+
