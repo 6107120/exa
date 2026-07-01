@@ -260,11 +260,82 @@ func (o *literalOptimizer) rewrite(fac ast.ExprFactory, nextID func() int64, e a
 	case ast.CallKind:
 		call := e.AsCall()
 		args := make([]ast.Expr, len(call.Args()))
-		for i, a := range call.Args() { args[i] = o.rewrite(fac, nextID, a) }
+		for i, a := range call.Args() {
+			args[i] = o.rewrite(fac, nextID, a)
+		}
 		if call.IsMemberFunction() {
 			return fac.NewMemberCall(e.ID(), call.FunctionName(), o.rewrite(fac, nextID, call.Target()), args...)
 		}
 		return fac.NewCall(e.ID(), call.FunctionName(), args...)
+	case ast.SelectKind:
+		sel := e.AsSelect()
+		operand := o.rewrite(fac, nextID, sel.Operand())
+		if sel.IsTestOnly() {
+			return fac.NewPresenceTest(e.ID(), operand, sel.FieldName())
+		}
+		return fac.NewSelect(e.ID(), operand, sel.FieldName())
+	case ast.ListKind:
+		list := e.AsList()
+		elems := make([]ast.Expr, len(list.Elements()))
+		for i, el := range list.Elements() {
+			elems[i] = o.rewrite(fac, nextID, el)
+		}
+		return fac.NewList(e.ID(), elems, list.OptionalIndices())
+	case ast.MapKind:
+		m := e.AsMap()
+		entries := make([]ast.EntryExpr, len(m.Entries()))
+		for i, entry := range m.Entries() {
+			if entry.Kind() == ast.MapEntryKind {
+				me := entry.AsMapEntry()
+				k := o.rewrite(fac, nextID, me.Key())
+				v := o.rewrite(fac, nextID, me.Value())
+				entries[i] = fac.NewMapEntry(entry.ID(), k, v, me.IsOptional())
+			} else {
+				entries[i] = entry
+			}
+		}
+		return fac.NewMap(e.ID(), entries)
+	case ast.StructKind:
+		str := e.AsStruct()
+		fields := make([]ast.EntryExpr, len(str.Fields()))
+		for i, entry := range str.Fields() {
+			if entry.Kind() == ast.StructFieldKind {
+				sf := entry.AsStructField()
+				v := o.rewrite(fac, nextID, sf.Value())
+				fields[i] = fac.NewStructField(entry.ID(), sf.Name(), v, sf.IsOptional())
+			} else {
+				fields[i] = entry
+			}
+		}
+		return fac.NewStruct(e.ID(), str.TypeName(), fields)
+	case ast.ComprehensionKind:
+		comp := e.AsComprehension()
+		iterRange := o.rewrite(fac, nextID, comp.IterRange())
+		accuInit := o.rewrite(fac, nextID, comp.AccuInit())
+		loopCondition := o.rewrite(fac, nextID, comp.LoopCondition())
+		loopStep := o.rewrite(fac, nextID, comp.LoopStep())
+		result := o.rewrite(fac, nextID, comp.Result())
+		if comp.HasIterVar2() {
+			return fac.NewComprehensionTwoVar(e.ID(),
+				iterRange,
+				comp.IterVar(),
+				comp.IterVar2(),
+				comp.AccuVar(),
+				accuInit,
+				loopCondition,
+				loopStep,
+				result,
+			)
+		}
+		return fac.NewComprehension(e.ID(),
+			iterRange,
+			comp.IterVar(),
+			comp.AccuVar(),
+			accuInit,
+			loopCondition,
+			loopStep,
+			result,
+		)
 	}
 	return e
 }

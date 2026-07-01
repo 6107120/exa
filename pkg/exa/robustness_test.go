@@ -81,7 +81,7 @@ func TestExa_Robustness_Complex(t *testing.T) {
 		req := Request{
 			Policy: []Calculation{
 				{ID: "p1", Expression: "0.1 + 0.2"},
-				{ID: "p2", Expression: "1 / 3"}, // 0.3333...
+				{ID: "p2", Expression: "1 / 3"},  // 0.3333...
 				{ID: "p3", Expression: "p2 * 3"}, // Should be 1.0000... if high precision is kept
 			},
 		}
@@ -106,7 +106,7 @@ func TestExa_Robustness_Complex(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, res["total"].Equal(decimal.RequireFromString("60.5")))
 	})
-	
+
 	t.Run("Precision_DirtyFloatVsCleanString", func(t *testing.T) {
 		// 1. float64 input: 0.1 in float64 is not exactly 0.1
 		// decimal.NewFromFloat handles this by getting the shortest precise string,
@@ -142,4 +142,36 @@ func TestExa_Robustness_Complex(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "assertion failed: Underage access")
 	})
+}
+
+func TestExa_DynamicMapPromotion(t *testing.T) {
+	ctx := context.Background()
+	engine := NewEngine()
+
+	// The original user formula with dynamic map lookup values (uncasted)
+	req := Request{
+		Inputs: map[string]any{
+			"segments": []any{
+				map[string]any{
+					"leave":                 "10",
+					"weekday_regular_night": "20",
+					"weekday_regular_day":   "30",
+					"weekday_overtime_day":  "40",
+				},
+			},
+			"contract": map[string]any{
+				"daily_contractual_minutes": "40",
+			},
+		},
+		Policy: []Calculation{
+			{
+				ID:         "sample",
+				Expression: "vec_sum(segments.map(item, max(0, max(item['leave'] + item['weekday_regular_night'], item['weekday_regular_day'] + item['weekday_regular_night'] + min(item['leave'], item['weekday_overtime_day'])) - contract['daily_contractual_minutes'])))",
+			},
+		},
+	}
+
+	res, err := engine.Compute(ctx, req)
+	assert.NoError(t, err)
+	assert.True(t, res["sample"].Equal(decimal.NewFromInt(20)))
 }
