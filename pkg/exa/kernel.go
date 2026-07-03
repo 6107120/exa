@@ -2,6 +2,7 @@ package exa
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -25,19 +26,20 @@ func NewEngine() *Engine {
 	return &Engine{}
 }
 
-// Compute executes a set of formulas against a given input context.
-func (e *Engine) Compute(ctx context.Context, req Request) (map[string]decimal.Decimal, error) {
+// Compute executes a set of formulas against a given input context and returns
+// the full Result, including non-numeric (string/bool) results.
+func (e *Engine) Compute(ctx context.Context, req Request) (Result, error) {
 	// 0. Preprocessing: Normalize and clean all Unicode strings (NFC, remove invisible control chars, etc.)
 	req = NormalizeRequest(req)
 
 	res, err := e.compute(ctx, req)
 	if err != nil {
-		return nil, DeobfuscateError(err)
+		return Result{}, DeobfuscateError(err)
 	}
 	return res, nil
 }
 
-func (e *Engine) compute(ctx context.Context, req Request) (map[string]decimal.Decimal, error) {
+func (e *Engine) compute(ctx context.Context, req Request) (Result, error) {
 	// 1. High-performance Fast-Path: If no Unicode characters are present, bypass transpilation completely.
 	var transpiledReq Request
 	isTranspiled := NeedsTranspilation(req)
@@ -50,23 +52,23 @@ func (e *Engine) compute(ctx context.Context, req Request) (map[string]decimal.D
 	// 2. Validate identifiers and compile ASTs
 	uniqueKeys := make(map[string]bool)
 	for k := range transpiledReq.Inputs {
-		if uniqueKeys[k] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, k) }
+		if uniqueKeys[k] { return Result{}, fmt.Errorf("%w: %s", ErrDuplicateID, k) }
 		uniqueKeys[k] = true
 	}
 	for _, p := range transpiledReq.Policy {
-		if uniqueKeys[p.ID] { return nil, fmt.Errorf("%w: %s", ErrDuplicateID, p.ID) }
+		if uniqueKeys[p.ID] { return Result{}, fmt.Errorf("%w: %s", ErrDuplicateID, p.ID) }
 		uniqueKeys[p.ID] = true
 	}
 
 	env, err := e.getEnv(transpiledReq)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 
 	// 3. Sort nodes by dependency (DAG)
 	nodes, err := sortByDependencies(transpiledReq.Policy)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 
 	// 4. Execution Context (Flat namespace)
@@ -76,12 +78,16 @@ func (e *Engine) compute(ctx context.Context, req Request) (map[string]decimal.D
 	}
 
 	// 5. Sequential Execution
-	output := make(map[string]decimal.Decimal)
+	rs := Result{
+		Decimals: make(map[string]decimal.Decimal),
+		Strings:  make(map[string]string),
+		Bools:    make(map[string]bool),
+	}
 	for _, node := range nodes {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return Result{}, ctx.Err()
 		default:
 		}
 
@@ -94,38 +100,76 @@ func (e *Engine) compute(ctx context.Context, req Request) (map[string]decimal.D
 			var err error
 			prg, err = env.Program(node.ast)
 			if err != nil {
-				return nil, &EvalError{ID: node.ID, Inner: err}
+				return Result{}, &EvalError{ID: node.ID, Inner: err}
 			}
 			e.programCache.Store(progKey, prg)
 		}
 
 		res, _, err := prg.Eval(results)
 		if err != nil {
-			return nil, &EvalError{ID: node.ID, Inner: err}
+			return Result{}, &EvalError{ID: node.ID, Inner: err}
 		}
 
 		results[node.ID] = res
-		
-		if d, ok := res.(*Decimal); ok {
-			output[node.ID] = d.Decimal
+
+		// Collect the result, coercing any numeric CEL value to Decimal so that
+		// integer-typed results (e.g. size(x)) still surface, and capturing
+		// string/bool results that would otherwise be dropped.
+		key := decodeUnicodeIdent(node.ID)
+		switch v := res.(type) {
+		case *Decimal:
+			rs.Decimals[key] = v.Decimal
+		case types.Int:
+			rs.Decimals[key] = decimal.NewFromInt(int64(v))
+		case types.Uint:
+			rs.Decimals[key] = decimal.NewFromUint64(uint64(v))
+		case types.Double:
+			rs.Decimals[key] = decimal.NewFromFloat(float64(v))
+		case types.String:
+			rs.Strings[key] = string(v)
+		case types.Bool:
+			rs.Bools[key] = bool(v)
 		}
 	}
 
-	// Re-map output keys to original decoded Unicode format
-	decodedOutput := make(map[string]decimal.Decimal, len(output))
-	for k, v := range output {
-		decodedOutput[decodeUnicodeIdent(k)] = v
-	}
-
-	return decodedOutput, nil
+	return rs, nil
 }
 
 func (e *Engine) getEnvKey(req Request) string {
 	keys := make([]string, 0, len(req.Inputs)+len(req.Policy))
-	for k := range req.Inputs { keys = append(keys, k) }
+	// Inputs carry a type code because numeric inputs are declared with the concrete
+	// DecimalType (not DynType); the same name may map to different types across calls.
+	for k, v := range req.Inputs { keys = append(keys, k+"#"+inputTypeCode(v)) }
 	for _, p := range req.Policy { keys = append(keys, p.ID) }
 	sort.Strings(keys)
 	return strings.Join(keys, ",")
+}
+
+// isNumericInput reports whether a raw input value will be converted to a Decimal
+// by the registry (mirrors Registry.NativeToValue), so it can be declared with a
+// concrete DecimalType instead of DynType.
+func isNumericInput(v any) bool {
+	switch x := v.(type) {
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return true
+	case json.Number:
+		_, err := decimal.NewFromString(string(x))
+		return err == nil
+	case string:
+		_, err := decimal.NewFromString(x)
+		return err == nil
+	default:
+		return false
+	}
+}
+
+func inputTypeCode(v any) string {
+	if isNumericInput(v) {
+		return "dec"
+	}
+	return "dyn"
 }
 
 func (e *Engine) getEnv(req Request) (*cel.Env, error) {
@@ -134,16 +178,25 @@ func (e *Engine) getEnv(req Request) (*cel.Env, error) {
 		return val.(*cel.Env), nil
 	}
 
-	keys := strings.Split(cacheKey, ",")
 	reg := NewRegistry()
 	opts := []cel.EnvOption{
 		cel.Lib(Library{}),
 		cel.Macros(cel.StandardMacros...),
 		cel.CustomTypeAdapter(reg),
 	}
-	for _, k := range keys {
-		if k == "" { continue }
-		opts = append(opts, cel.Variable(k, cel.DynType))
+	// Numeric inputs are declared with the concrete DecimalType so the checker
+	// resolves a single arithmetic/comparison overload even when the other operand
+	// is a builtin Int (e.g. size(x)); non-numeric inputs and all policy results
+	// stay DynType. This is what makes flat "size(segs) / days" resolve cleanly.
+	for k, v := range req.Inputs {
+		if isNumericInput(v) {
+			opts = append(opts, cel.Variable(k, DecimalType))
+		} else {
+			opts = append(opts, cel.Variable(k, cel.DynType))
+		}
+	}
+	for _, p := range req.Policy {
+		opts = append(opts, cel.Variable(p.ID, cel.DynType))
 	}
 
 	env, err := cel.NewEnv(opts...)

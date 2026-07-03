@@ -61,7 +61,9 @@ func TestExa_EdgeCases(t *testing.T) {
 		}
 		res, err := engine.Compute(ctx, req)
 		assert.NoError(t, err)
-		assert.Empty(t, res)
+		assert.Empty(t, res.Decimals)
+		assert.Empty(t, res.Strings)
+		assert.Empty(t, res.Bools)
 	})
 }
 
@@ -74,7 +76,7 @@ func TestExa_Robustness_Complex(t *testing.T) {
 		}
 		res, err := Compute(Request{Policy: policy})
 		assert.NoError(t, err)
-		assert.True(t, res["n3"].Equal(decimal.NewFromInt(3)))
+		assert.True(t, res.Decimals["n3"].Equal(decimal.NewFromInt(3)))
 	})
 
 	t.Run("PrecisionCheck", func(t *testing.T) {
@@ -87,12 +89,12 @@ func TestExa_Robustness_Complex(t *testing.T) {
 		}
 		res, err := Compute(req)
 		assert.NoError(t, err)
-		assert.True(t, res["p1"].Equal(decimal.RequireFromString("0.3")))
+		assert.True(t, res.Decimals["p1"].Equal(decimal.RequireFromString("0.3")))
 		// shopspring/decimal's default division precision is 16.
 		// p2 will be 0.3333333333333333
 		// p3 will be 0.9999999999999999
 		// To get exactly 1, we'd need rational numbers, but for Decimal this is expected.
-		assert.True(t, res["p3"].GreaterThan(decimal.RequireFromString("0.9999")))
+		assert.True(t, res.Decimals["p3"].GreaterThan(decimal.RequireFromString("0.9999")))
 	})
 
 	t.Run("ListAndSumMixed", func(t *testing.T) {
@@ -104,7 +106,7 @@ func TestExa_Robustness_Complex(t *testing.T) {
 		}
 		res, err := Compute(req)
 		assert.NoError(t, err)
-		assert.True(t, res["total"].Equal(decimal.RequireFromString("60.5")))
+		assert.True(t, res.Decimals["total"].Equal(decimal.RequireFromString("60.5")))
 	})
 
 	t.Run("Precision_DirtyFloatVsCleanString", func(t *testing.T) {
@@ -128,9 +130,9 @@ func TestExa_Robustness_Complex(t *testing.T) {
 		assert.NoError(t, err)
 
 		// float64 based result will be limited to ~16 digits
-		assert.NotEqual(t, "1", res["f_res"].String())
+		assert.NotEqual(t, "1", res.Decimals["f_res"].String())
 		// string based result preserves the extreme precision
-		assert.Equal(t, "0.999999999999999999999999999999999999", res["s_res"].String())
+		assert.Equal(t, "0.999999999999999999999999999999999999", res.Decimals["s_res"].String())
 	})
 
 	t.Run("AssertionFailure", func(t *testing.T) {
@@ -173,7 +175,7 @@ func TestExa_DynamicMapPromotion(t *testing.T) {
 
 	res, err := engine.Compute(ctx, req)
 	assert.NoError(t, err)
-	assert.True(t, res["sample"].Equal(decimal.NewFromInt(20)))
+	assert.True(t, res.Decimals["sample"].Equal(decimal.NewFromInt(20)))
 }
 
 func TestExa_ImplicitDecimalSize(t *testing.T) {
@@ -198,6 +200,6 @@ func TestExa_ImplicitDecimalSize(t *testing.T) {
 
 	res, err := engine.Compute(ctx, req)
 	assert.NoError(t, err)
-	assert.True(t, res["result"].Equal(decimal.RequireFromString("0.2")))
+	assert.True(t, res.Decimals["result"].Equal(decimal.RequireFromString("0.2")))
 }
 

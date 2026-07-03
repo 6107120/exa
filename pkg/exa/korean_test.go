@@ -35,11 +35,11 @@ func TestExa_KoreanDependency_AutoResolution(t *testing.T) {
 	assert.NoError(t, err)
 
 	// 세금_5프로 = 5000000 * 0.05 = 250000
-	assert.True(t, res["세금_5프로"].Equal(decimal.NewFromInt(250000)))
+	assert.True(t, res.Decimals["세금_5프로"].Equal(decimal.NewFromInt(250000)))
 	// 건강보험료 = 5000000 * 0.03 = 150000
-	assert.True(t, res["건강보험료"].Equal(decimal.NewFromInt(150000)))
+	assert.True(t, res.Decimals["건강보험료"].Equal(decimal.NewFromInt(150000)))
 	// 실수령액 = 5000000 - 250000 - 150000 = 4600000
-	assert.True(t, res["실수령액"].Equal(decimal.NewFromInt(4600000)))
+	assert.True(t, res.Decimals["실수령액"].Equal(decimal.NewFromInt(4600000)))
 }
 
 func TestExa_KoreanDependency_CircularDetection(t *testing.T) {
@@ -87,9 +87,9 @@ func TestExa_GlobalUnicode_Multilingual(t *testing.T) {
 	assert.NoError(t, err)
 
 	// 税金_5パーセント = 400000 * 0.05 = 20000
-	assert.True(t, res["税金_5パーセント"].Equal(decimal.NewFromInt(20000)))
+	assert.True(t, res.Decimals["税金_5パーセント"].Equal(decimal.NewFromInt(20000)))
 	// 총급여 = 400000 - 20000 = 380000
-	assert.True(t, res["총급여"].Equal(decimal.NewFromInt(380000)))
+	assert.True(t, res.Decimals["총급여"].Equal(decimal.NewFromInt(380000)))
 }
 
 func TestExa_Unicode_Normalization_And_Sanitization(t *testing.T) {
@@ -123,8 +123,8 @@ func TestExa_Unicode_Normalization_And_Sanitization(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Keys in res should be returned in beautiful, normalized NFC
-	assert.True(t, res["세금_5프로"].Equal(decimal.NewFromInt(250000)))
-	assert.True(t, res["실수령액"].Equal(decimal.NewFromInt(4750000)))
+	assert.True(t, res.Decimals["세금_5프로"].Equal(decimal.NewFromInt(250000)))
+	assert.True(t, res.Decimals["실수령액"].Equal(decimal.NewFromInt(4750000)))
 }
 
 func TestExa_Error_Deobfuscation(t *testing.T) {

@@ -23,8 +23,15 @@ type Calculation struct {
 	ast *cel.Ast
 }
 
-// Result is the final output map of calculated values.
-type Result map[string]decimal.Decimal
+// Result is the final output of a calculation batch. Decimals holds numeric
+// results; Strings and Bools carry results whose runtime value is a string or
+// bool (e.g. a bare fact passthrough like "M"), so callers no longer need to
+// re-inject dropped values downstream.
+type Result struct {
+	Decimals map[string]decimal.Decimal
+	Strings  map[string]string
+	Bools    map[string]bool
+}
 
 // Custom error definitions for programmatic handling.
 var (

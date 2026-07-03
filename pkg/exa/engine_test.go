@@ -26,9 +26,9 @@ func TestExa_FullFlow(t *testing.T) {
 	assert.NoError(t, err)
 
 	// base_pay(5000000) * tax_rate(0.1) = 500000
-	assert.True(t, res["tax_amount"].Equal(decimal.NewFromInt(500000)))
+	assert.True(t, res.Decimals["tax_amount"].Equal(decimal.NewFromInt(500000)))
 	// 5000000 - 500000 = 4500000
-	assert.True(t, res["final_pay"].Equal(decimal.NewFromInt(4500000)))
+	assert.True(t, res.Decimals["final_pay"].Equal(decimal.NewFromInt(4500000)))
 }
 
 func TestExa_AutomaticDependency(t *testing.T) {
@@ -44,8 +44,8 @@ func TestExa_AutomaticDependency(t *testing.T) {
 	res, err := Compute(req)
 	assert.NoError(t, err)
 
-	assert.True(t, res["tax"].Equal(decimal.NewFromInt(100)))
-	assert.True(t, res["total"].Equal(decimal.NewFromInt(1100)))
+	assert.True(t, res.Decimals["tax"].Equal(decimal.NewFromInt(100)))
+	assert.True(t, res.Decimals["total"].Equal(decimal.NewFromInt(1100)))
 }
 
 func TestExa_MixedTypes(t *testing.T) {
@@ -62,7 +62,7 @@ func TestExa_MixedTypes(t *testing.T) {
 
 	res, err := Compute(req)
 	assert.NoError(t, err)
-	assert.True(t, res["res"].Equal(decimal.NewFromInt(30)))
+	assert.True(t, res.Decimals["res"].Equal(decimal.NewFromInt(30)))
 }
 
 func TestExa_Builtins(t *testing.T) {
@@ -76,8 +76,8 @@ func TestExa_Builtins(t *testing.T) {
 
 	res, err := Compute(req)
 	assert.NoError(t, err)
-	assert.True(t, res["s"].Equal(decimal.RequireFromString("60.5")))
-	assert.True(t, res["m"].Equal(decimal.RequireFromString("20")))
+	assert.True(t, res.Decimals["s"].Equal(decimal.RequireFromString("60.5")))
+	assert.True(t, res.Decimals["m"].Equal(decimal.RequireFromString("20")))
 }
 
 func TestExa_VectorOperations(t *testing.T) {
@@ -96,7 +96,7 @@ func TestExa_VectorOperations(t *testing.T) {
 
 	res, err := Compute(req)
 	assert.NoError(t, err)
-	assert.True(t, res["sum_total"].Equal(decimal.NewFromInt(1500)))
+	assert.True(t, res.Decimals["sum_total"].Equal(decimal.NewFromInt(1500)))
 }
 
 func TestExa_TemporalOperations(t *testing.T) {
@@ -114,13 +114,13 @@ func TestExa_TemporalOperations(t *testing.T) {
 	}
 	res, err := Compute(req)
 	assert.NoError(t, err)
-	assert.True(t, res["yr"].Equal(decimal.NewFromInt(2023)))
-	assert.True(t, res["mon"].Equal(decimal.NewFromInt(5)))
-	assert.True(t, res["dy"].Equal(decimal.NewFromInt(15)))
-	assert.True(t, res["db"].Equal(decimal.NewFromInt(2)))
-	assert.True(t, res["dim1"].Equal(decimal.NewFromInt(28)))
-	assert.True(t, res["dim2"].Equal(decimal.NewFromInt(29)))
-	assert.True(t, res["pro_rata"].Equal(decimal.RequireFromString("0.5")))
+	assert.True(t, res.Decimals["yr"].Equal(decimal.NewFromInt(2023)))
+	assert.True(t, res.Decimals["mon"].Equal(decimal.NewFromInt(5)))
+	assert.True(t, res.Decimals["dy"].Equal(decimal.NewFromInt(15)))
+	assert.True(t, res.Decimals["db"].Equal(decimal.NewFromInt(2)))
+	assert.True(t, res.Decimals["dim1"].Equal(decimal.NewFromInt(28)))
+	assert.True(t, res.Decimals["dim2"].Equal(decimal.NewFromInt(29)))
+	assert.True(t, res.Decimals["pro_rata"].Equal(decimal.RequireFromString("0.5")))
 }
 
 func TestExa_ProgramCaching(t *testing.T) {
@@ -137,5 +137,5 @@ func TestExa_ProgramCaching(t *testing.T) {
 	// Second run (should hit cache)
 	res, err := engine.Compute(context.Background(), req)
 	assert.NoError(t, err)
-	assert.True(t, res["res"].Equal(decimal.NewFromInt(11)))
+	assert.True(t, res.Decimals["res"].Equal(decimal.NewFromInt(11)))
 }

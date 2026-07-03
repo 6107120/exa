@@ -21,6 +21,11 @@ func (Library) CompileOptions() []cel.EnvOption {
 		cel.Types(DecimalType),
 	}
 
+	// The full set of LHS operand types is declared paired with Decimal. Beyond the
+	// numeric builtins (which is where a concrete Int LHS such as size() lands), the
+	// remaining entries participate in the checker's overload resolution when an
+	// operand is dyn (e.g. a map/list index); dropping them makes the checker fail
+	// with "unexpected unspecified type" on dynamic-map expressions.
 	lhsTypes := []*cel.Type{
 		cel.IntType,
 		cel.UintType,
@@ -310,23 +315,27 @@ func (Library) CompileOptions() []cel.EnvOption {
 func (Library) ProgramOptions() []cel.ProgramOption {
 	var overloads []*functions.Overload
 
+	// Kept in sync with CompileOptions lhsTypes.
 	typeNames := []string{"int", "uint", "double", "string", "bytes", "duration", "timestamp", "bool", "list", "map"}
 	builtins := []string{"int64", "uint64", "double"}
 
-	// 1. Arithmetic Operators bindings (including builtins hijacking)
+	// 1. Arithmetic Operators bindings.
+	// These bind the exa-specific overloads (X_decimal / decimal_dyn) that the checker
+	// resolves whenever one operand is a Decimal. Pure builtin combinations (int+int, ...)
+	// are intentionally NOT overridden here: they evaluate via the standard library and
+	// their (numeric) results are coerced to Decimal at output collection time. Division
+	// is the sole exception (see below) because integer division would silently truncate.
 	arithOps := []struct {
-		op     string
-		prefix string
-		f      func(d1, d2 decimal.Decimal) decimal.Decimal
+		op string
+		f  func(d1, d2 decimal.Decimal) decimal.Decimal
 	}{
-		{operators.Add, "add", func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Add(d2) }},
-		{operators.Subtract, "subtract", func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Sub(d2) }},
-		{operators.Multiply, "multiply", func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Mul(d2) }},
+		{operators.Add, func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Add(d2) }},
+		{operators.Subtract, func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Sub(d2) }},
+		{operators.Multiply, func(d1, d2 decimal.Decimal) decimal.Decimal { return d1.Mul(d2) }},
 	}
 
 	for _, spec := range arithOps {
 		op := spec.op
-		prefix := spec.prefix
 		f := spec.f
 
 		overloads = append(overloads, &functions.Overload{
@@ -346,20 +355,9 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 				},
 			})
 		}
-
-		// Hijack standard operators to ensure that dyn + decimal or int + dyn evaluates cleanly as Decimal
-		for _, bName := range builtins {
-			overloads = append(overloads, &functions.Overload{
-				Operator: fmt.Sprintf("%s_%s", prefix, bName),
-				Binary: func(lhs, rhs ref.Val) ref.Val {
-					l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
-					return NewDecimal(f(l, r))
-				},
-			})
-		}
 	}
 
-	// Division Operator with zero division guard (including builtins hijacking)
+	// Division Operator with zero division guard.
 	overloads = append(overloads, &functions.Overload{
 		Operator: "divide_decimal_dyn",
 		Binary: func(lhs, rhs ref.Val) ref.Val {
@@ -380,6 +378,9 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 		})
 	}
 
+	// Intentional exception: override the builtin int/uint/double division overloads so that
+	// pure numeric division (e.g. size(a)/size(b)) performs high-precision Decimal division
+	// instead of the standard library's truncating integer division.
 	for _, bName := range builtins {
 		overloads = append(overloads, &functions.Overload{
 			Operator: fmt.Sprintf("divide_%s", bName),
@@ -391,21 +392,21 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 		})
 	}
 
-	// 2. Comparison Operators bindings (including builtins hijacking)
+	// 2. Comparison Operators bindings.
+	// As with arithmetic, only the exa-specific Decimal overloads are bound; builtin
+	// comparisons (int>int, ...) already return the correct bool via the standard library.
 	cmpOps := []struct {
-		op     string
-		prefix string
-		f      func(d1, d2 decimal.Decimal) bool
+		op string
+		f  func(d1, d2 decimal.Decimal) bool
 	}{
-		{operators.Greater, "greater", func(d1, d2 decimal.Decimal) bool { return d1.GreaterThan(d2) }},
-		{operators.Less, "less", func(d1, d2 decimal.Decimal) bool { return d1.LessThan(d2) }},
-		{operators.GreaterEquals, "greater_equals", func(d1, d2 decimal.Decimal) bool { return d1.GreaterThanOrEqual(d2) }},
-		{operators.LessEquals, "less_equals", func(d1, d2 decimal.Decimal) bool { return d1.LessThanOrEqual(d2) }},
+		{operators.Greater, func(d1, d2 decimal.Decimal) bool { return d1.GreaterThan(d2) }},
+		{operators.Less, func(d1, d2 decimal.Decimal) bool { return d1.LessThan(d2) }},
+		{operators.GreaterEquals, func(d1, d2 decimal.Decimal) bool { return d1.GreaterThanOrEqual(d2) }},
+		{operators.LessEquals, func(d1, d2 decimal.Decimal) bool { return d1.LessThanOrEqual(d2) }},
 	}
 
 	for _, spec := range cmpOps {
 		op := spec.op
-		prefix := spec.prefix
 		f := spec.f
 
 		overloads = append(overloads, &functions.Overload{
@@ -419,16 +420,6 @@ func (Library) ProgramOptions() []cel.ProgramOption {
 		for _, tName := range typeNames {
 			overloads = append(overloads, &functions.Overload{
 				Operator: fmt.Sprintf("%s_%s_decimal", op, tName),
-				Binary: func(lhs, rhs ref.Val) ref.Val {
-					l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
-					return types.Bool(f(l, r))
-				},
-			})
-		}
-
-		for _, bName := range builtins {
-			overloads = append(overloads, &functions.Overload{
-				Operator: fmt.Sprintf("%s_%s", prefix, bName),
 				Binary: func(lhs, rhs ref.Val) ref.Val {
 					l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
 					return types.Bool(f(l, r))
