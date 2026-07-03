@@ -1,111 +1,141 @@
 # Contributing to Exa
 
-Thank you for your interest in contributing to Exa! Exa is a high-precision, CEL-based calculation engine designed to execute dynamic formulas with strict decimal correctness while offering a seamless, excel-like user experience.
+Exa is a high-precision, CEL-based calculation engine that executes dynamic formulas with strict decimal correctness and an "excel-like" authoring experience — plain values in, plain formulas in, precise results out.
 
-This guide outlines our project philosophy, contribution workflows, and strict development guidelines for adding new functions or operators.
-
----
-
-## 1. Project Philosophy & Core Architecture
-
-Exa's architecture relies on the following two key pillars:
-1. **No Explicit Casting**: Users should not need to wrap formulas in casting functions like `decimal(...)` unless absolutely necessary. The engine automatically handles type mismatches behind the scenes.
-2. **Implicit Coercion**: Operations involving a mix of custom high-precision `Decimal` values and standard Go/CEL primitives (such as `int`, `double`, or `dyn`) are dynamically promoted to `Decimal` at runtime without losing precision.
+This guide gives you the mental model to contribute effectively: the **execution pipeline**, the **type & coercion model**, and — most importantly — the **operator overload-resolution model** that governs why arithmetic on mixed types either works or fails. Read §3 before touching any operator.
 
 ---
 
-## 2. Guidelines for Adding Functions and Operators
+## 1. Guarantees We Preserve
 
-To prevent runtime errors (such as `no such overload` or type mismatches) and ensure structural elegance, all new functions and operators must adhere to these three standard protocols.
+1. **No explicit casting.** Users never wrap operands in `decimal(...)` or declare types. `size(segs) / days` must "just work".
+2. **Precision everywhere.** Every numeric value is backed by `shopspring/decimal`. No IEEE-754 drift, ever.
+3. **Self-contained arithmetic.** Correctness must not depend on which operand happens to be on the left, or whether an expression is written flat vs. nested.
 
-### Protocol 1. Implicit Casting & Type Unification
-* **Parameter Laxity**: Declare function arguments as `cel.DynType` at compile time so that they can receive integers, floats, strings, or decimal values.
-* **Runtime Elevation**: Inside the runtime binding implementation, run all numeric operands through the `ToDecimal(val)` helper to safely coerce them into `decimal.Decimal`.
-* **Result Unification**: All math/calculation results must be returned as a `*Decimal` instance using the `NewDecimal(...)` wrapper.
+A change that regresses any of these is a bug, no matter how clean it looks.
 
-#### Code Pattern (Standard Function):
+---
+
+## 2. Execution Pipeline
+
+A single `Compute` call flows through these stages (`pkg/exa/kernel.go` unless noted):
+
+| # | Stage | What happens |
+|---|-------|--------------|
+| 1 | **Normalize** (`transpile.go`) | Unicode NFC + strip invisible/control chars from idents & string literals. |
+| 2 | **Transpile** (`transpile.go`) | If non-ASCII identifiers are present, encode them to ASCII-safe names (decoded back at the end). Pure-ASCII requests skip this. |
+| 3 | **Env build** (`getEnv`) | Declare each **input** variable with a concrete type (numeric → `DecimalType`, else `DynType`) and each **policy id** as `DynType`. Cached by an env signature that includes input type codes. |
+| 4 | **Literal optimization** (`literalOptimizer`) | Rewrite every numeric literal `N` into `decimal("N")` so literals are `Decimal` from the start. |
+| 5 | **DAG sort** (`sortByDependencies`) | Derive execution order by scanning identifiers referenced in each checked AST. Cycles → error. |
+| 6 | **Evaluate** | Run nodes in order; compiled programs are cached by `envSignature + expression`. |
+| 7 | **Collect** | Partition each result by runtime type into `Result{Decimals, Strings, Bools}` (§4). |
+
+---
+
+## 3. The Operator Overload-Resolution Model  ⭐
+
+This is the non-obvious core. Custom types (`*Decimal`) interoperate with builtin CEL types (`int` from `size()`, `dyn` from map/list lookups) **only** because of how CEL resolves and dispatches operator calls.
+
+### 3.1 How CEL picks an implementation
+
+For a call like `a / b`, the **type checker** matches the operand types against every declared overload:
+
+- **Exactly one** candidate survives → the planner records that overload id and calls **its registered binding** directly.
+- **Several** candidates survive (typically because an operand is `dyn`, which is assignable to everything) → the planner records **no** id and falls back to the operator's **standard-library singleton**, which dispatches on the **left operand's trait** (`lhs.(traits.Divider).Divide(rhs)`).
+
+That fallback is the trap. If the LHS is a builtin `types.Int` (e.g. `size(x)`) and the RHS is a `*Decimal`, the singleton calls `Int.Divide(Decimal)` — and `Int` has no idea what a `Decimal` is → **`no such overload`**.
+
+### 3.2 Why our `*Decimal` is on both sides
+
+`*Decimal` (`types.go`) implements `Adder / Subtractor / Multiplier / Divider / Comparer`, and each method funnels the *other* operand through `ToDecimal`. So whenever a `*Decimal` is the **left** operand (including `dyn` variables that hold a `*Decimal` at runtime), the singleton dispatches to *our* trait method and coercion succeeds. The failure only ever appeared when a **builtin `Int` sat on the left** with a non-single overload set.
+
+### 3.3 The fix: make operands concrete, not `dyn`
+
+We remove the ambiguity at its source (`getEnv`): **numeric inputs are declared as `DecimalType`, not `DynType`.** Then `size(x) / days` type-checks as `[int, decimal]`, which matches exactly one overload (`divide_int_decimal`) → the checker records the id → our binding runs. No singleton fallback, no left-operand dependency.
+
+This is why the exa-specific signatures exist. In `lib.go`:
+
+- **`CompileOptions()`** declares the signatures: `<op>_decimal_dyn` (`[Decimal, dyn]`) and `<op>_<T>_decimal` (`[T, Decimal]`) for every builtin `T`.
+- **`ProgramOptions()`** registers the runtime bindings for those ids via `cel.Functions`, each coercing both sides with `ToDecimal`.
+
+> **You cannot override the singleton.** `dispatcher.Add` rejects a second registration under an operator name (`_/_`), and the declaration layer rejects redefining a function's singleton binding. So the *only* levers you have are (a) **operand types** and (b) **per-overload-id bindings**. Attaching bindings alone never fixes a `dyn`-induced ambiguity — the type change in §3.3 is what does.
+
+### 3.4 The one deliberate hijack: division
+
+Builtin overload ids (`add_int64`, `divide_int64`, …) have **no** singleton dispatcher entry, so — unlike `_/_` — they *can* be registered. We exploit this in exactly one place: `divide_int64` / `divide_uint64` are overridden so that pure integer division (`size(a) / size(b)`) performs **high-precision decimal division** instead of truncating. Add/subtract/multiply/compare are **not** hijacked — their builtin results are numerically correct and simply coerced to `Decimal` at collection time (§4).
+
+### 3.5 Keep the full overload matrix
+
+`CompileOptions` declares `<op>_<T>_decimal` for *all* builtin `T` (string, list, timestamp, …), not just the numeric ones. The non-numeric pairings look dead but are **load-bearing**: they participate in the checker's overload resolution when an operand is `dyn` (e.g. a map/list index). Removing them makes the checker fail with `unexpected unspecified type` on dynamic-map expressions. If you touch `lhsTypes`, keep `CompileOptions.typeNames` and `ProgramOptions.typeNames` in sync and run the full suite.
+
+---
+
+## 4. Result Collection
+
+Each rule's result is routed by its **runtime** type (`kernel.go`):
+
+| Runtime value | Bucket |
+|---|---|
+| `*Decimal` | `Result.Decimals` |
+| `types.Int` / `types.Uint` / `types.Double` | `Result.Decimals` (coerced) |
+| `types.String` | `Result.Strings` |
+| `types.Bool` | `Result.Bools` |
+
+Coercing builtin numerics to `Decimal` here is what lets us *not* hijack add/sub/mul (§3.4) while still surfacing every numeric result. Preserving strings/bools means bare fact passthrough (e.g. a rule that just references `"M"`) is emitted directly — no downstream re-injection.
+
+---
+
+## 5. Extension Protocols
+
+### Protocol A — Custom (non-operator) functions
+- Declare parameters as `cel.DynType` so any input shape is accepted.
+- Inside the binding, run numeric operands through `ToDecimal(val)` (returns a `ref.Val` error you must propagate).
+- Return results via `NewDecimal(...)`.
+
 ```go
-cel.Function("my_math_func",
-    cel.Overload("my_math_func_any", []*cel.Type{cel.DynType}, DecimalType,
+cel.Function("my_func",
+    cel.Overload("my_func_any", []*cel.Type{cel.DynType}, DecimalType,
         cel.UnaryBinding(func(v ref.Val) ref.Val {
-            d, err := ToDecimal(v) // Safely elevates int, float, string, or Decimal
+            d, err := ToDecimal(v)
             if err != nil { return err }
-            return NewDecimal(d.Abs()) // Always return custom DecimalType
+            return NewDecimal(d.Abs())
         }),
     ),
 )
 ```
 
----
+### Protocol B — Operators
+Extend both halves in lock-step (see §3):
+1. Add the signature(s) in `CompileOptions()` — declaration only, no binding.
+2. Register the matching binding(s) in `ProgramOptions()`, coercing both sides via `ToDecimal`.
+3. Do **not** hijack `add_/subtract_/multiply_/<cmp>_` builtins — rely on output coercion. Only division overrides builtins, and only to avoid integer truncation.
 
-### Protocol 2. Operator Declaration-Implementation Split & Hijacking
-CEL resolves standard operators (like `+`, `-`, `*`, `/`, `<`, `<=`, `>`, `>=`) using static overload IDs at compile time. To avoid dispatch issues when operating on dynamic variables (like map lookups):
-
-1. **CompileOptions (Signature Only)**:
-   * Define only the signature declarations (using `cel.Overload`) in `CompileOptions()`.
-   * **Do not** bind runtime implementations here (e.g., avoid `cel.BinaryBinding`).
-   * Declare custom asymmetric signatures (like `[Decimal, dyn]` and `[int, Decimal]`) to satisfy the type checker.
-
-2. **ProgramOptions (Binding & Hijacking)**:
-   * Provide the execution bindings inside `ProgramOptions()` via `cel.Functions`.
-   * **Crucial**: You must hijack the standard CEL builtin overload IDs (`{prefix}_int64`, `{prefix}_uint64`, `{prefix}_double`) to ensure they evaluate as Decimals if either operand is promoted.
-
-#### Code Pattern (Operator Expansion):
-```go
-// 1. In CompileOptions(): Declare signatures
-cel.Function(operators.Add,
-    cel.Overload("add_decimal_dyn", []*cel.Type{DecimalType, cel.DynType}, DecimalType),
-    cel.Overload("add_int_decimal", []*cel.Type{cel.IntType, DecimalType}, DecimalType),
-)
-
-// 2. In ProgramOptions(): Register bindings and hijack builtins
-overloads = append(overloads, &functions.Overload{
-    Operator: "add_decimal_dyn",
-    Binary: func(lhs, rhs ref.Val) ref.Val {
-        l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
-        return NewDecimal(l.Add(r))
-    },
-})
-for _, bName := range []string{"int64", "uint64", "double"} {
-    overloads = append(overloads, &functions.Overload{
-        Operator: fmt.Sprintf("add_%s", bName), // Hijack CEL standard "add_int64", etc.
-        Binary: func(lhs, rhs ref.Val) ref.Val {
-            l, _ := ToDecimal(lhs); r, _ := ToDecimal(rhs)
-            return NewDecimal(l.Add(r))
-        },
-    })
-}
-```
+### Protocol C — Integer-returning builtins
+- Functions that return structural integers (`size`, `year`, `month`, …) keep their native `int` type. Do not force them to `Decimal` at the source — it would break anything that needs a real int (see limitations).
+- Their promotion into `Decimal` is handled automatically: by the `<op>_int_decimal` overloads when used in arithmetic, and by output coercion when returned directly.
 
 ---
 
-### Protocol 3. Integer Boundary Isolation
-* **Pure Integer Exceptions**: Functions that naturally return structural metadata or integer identifiers—such as `size(list)` (list length) or date components like `year(date)`—should maintain their native standard `int` return type.
-* **Why?**: This prevents breaking operations that strictly expect standard integers (e.g., list index access: `list[size(list) - 1]`).
-* **Coercion Delegation**: Let the hijacked operator bindings (Protocol 2) handle the promotion automatically if these integers are subsequently used in math calculations (e.g. `size(segments) / days`).
+## 6. Known Limitations
+
+- **Computed list indices.** `list[size(list) - 1]` fails: literals are promoted to `Decimal` (stage 4), so `size(list) - 1` is a `Decimal` and CEL rejects a non-integer index. Index with integer literals directly, or restructure.
+- **Numeric strings are numbers.** `"1"` is ingested as `Decimal(1)`; a numeric string cannot be preserved as text.
+- **Policy references stay `dyn`.** Cross-rule references are `DynType`. `size(x) / someRuleId` therefore relies on the singleton path; it works because rule results are `*Decimal` at runtime, but a *builtin-Int LHS ÷ policy-ref* is the one shape still exercising §3.1's fallback.
 
 ---
 
-## 3. Development & Testing Workflow
+## 7. Testing & Standards
 
-Before submitting a Pull Request, ensure that all tests pass and your code does not introduce regressions.
-
-### Running Tests
-Execute the tests locally within the workspace directory:
 ```bash
-go test -v ./pkg/exa
+go test ./pkg/exa          # full suite
+go test -run TestFix ./pkg/exa   # bare-scalar / passthrough regression set
+go vet ./...
 ```
 
-### Adding Tests
-When introducing a new function or operator, add appropriate test cases in:
-* `pkg/exa/engine_test.go` for standard flows and builtins.
-* `pkg/exa/robustness_test.go` for mixed-type boundaries and precision check edge cases.
+Add tests next to the closest existing file:
+- `engine_test.go` — core flows and builtins
+- `robustness_test.go` — mixed-type boundaries, precision edges, DAG/error cases
+- `korean_test.go` — internationalized identifiers & transpilation
+- `handoff_fix_test.go` — operator resolution / result-partitioning regressions
 
----
-
-## 4. Coding Standards
-
-* Keep responses and documentation concise.
-* Preserve existing comments and docstrings.
-* Use idiomatic Go formatting (`go fmt`).
-* Make sure all math calculations continue to run with high-precision shopspring/decimal backing.
+Standards: idiomatic `go fmt`; keep comments explaining the *why* (especially around overload resolution — it is easy to "simplify" into a regression); every numeric path must remain `shopspring/decimal`-backed.
