@@ -80,6 +80,28 @@ func TestExa_Builtins(t *testing.T) {
 	assert.True(t, res.Decimals["m"].Equal(decimal.RequireFromString("20")))
 }
 
+func TestExa_RoundDown(t *testing.T) {
+	req := Request{
+		Policy: []Calculation{
+			{ID: "pos_digits", Expression: "round_down(157.89, 1)"},      // 157.8
+			{ID: "zero_digits", Expression: "round_down(157.89, 0)"},     // 157
+			{ID: "neg_tens", Expression: "round_down(157.89, -1)"},       // 150
+			{ID: "neg_hundreds", Expression: "round_down(12345.678, -2)"}, // 12300
+			{ID: "neg_value", Expression: "round_down(-157.89, -1)"},     // -150 (toward zero)
+			{ID: "small_value", Expression: "round_down(7, -1)"},         // 0
+		},
+	}
+
+	res, err := Compute(req)
+	assert.NoError(t, err)
+	assert.True(t, res.Decimals["pos_digits"].Equal(decimal.RequireFromString("157.8")))
+	assert.True(t, res.Decimals["zero_digits"].Equal(decimal.NewFromInt(157)))
+	assert.True(t, res.Decimals["neg_tens"].Equal(decimal.NewFromInt(150)))
+	assert.True(t, res.Decimals["neg_hundreds"].Equal(decimal.NewFromInt(12300)))
+	assert.True(t, res.Decimals["neg_value"].Equal(decimal.NewFromInt(-150)))
+	assert.True(t, res.Decimals["small_value"].Equal(decimal.NewFromInt(0)))
+}
+
 func TestExa_VectorOperations(t *testing.T) {
 	req := Request{
 		Inputs: map[string]any{

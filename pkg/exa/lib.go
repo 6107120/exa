@@ -162,7 +162,13 @@ func (Library) CompileOptions() []cel.EnvOption {
 			cel.Overload("round_down_any", []*cel.Type{cel.DynType, cel.DynType}, DecimalType,
 				cel.BinaryBinding(func(l, r ref.Val) ref.Val {
 					ld, _ := ToDecimal(l); rd, _ := ToDecimal(r)
-					return NewDecimal(ld.Truncate(int32(rd.IntPart())))
+					p := int32(rd.IntPart())
+					if p >= 0 {
+						return NewDecimal(ld.Truncate(p))
+					}
+					// decimal.Truncate silently ignores negative precision, so shift
+					// the value by 10^p, truncate toward zero, and shift back.
+					return NewDecimal(ld.Mul(decimal.New(1, p)).Truncate(0).Mul(decimal.New(1, -p)))
 				}),
 			),
 		),
